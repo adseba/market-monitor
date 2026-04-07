@@ -15,7 +15,8 @@ import pandas as pd
 import schedule
 import time
 import os
-from datetime import datetime
+from datetime import datetime, time as dtime
+import pytz
 
 
 # ============================================================
@@ -28,6 +29,78 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 VOLUME_SPIKE_THRESHOLD = float(os.environ.get("VOLUME_SPIKE_THRESHOLD", "3.0"))
 PRICE_MOVE_THRESHOLD   = float(os.environ.get("PRICE_MOVE_THRESHOLD", "2.0"))
 CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "15"))
+
+# ============================================================
+#  GODZINY SESJI GIEŁDOWEJ (NYSE)
+#  Czas polski (CET/CEST):
+#    zimą:  15:30 – 22:00
+#    latem: 15:30 – 22:00 (NYSE nie zmienia godzin)
+#  Pre-market (opcjonalnie): 10:00 – 15:30
+# ============================================================
+
+TIMEZONE_PL     = pytz.timezone("Europe/Warsaw")
+TIMEZONE_NYSE   = pytz.timezone("America/New_York")
+
+# Godziny sesji NYSE w czasie nowojorskim
+MARKET_OPEN     = dtime(9, 25)   # 5 min przed otwarciem
+MARKET_CLOSE    = dtime(16, 5)   # 5 min po zamknięciu
+
+# Dni tygodnia: 0=poniedziałek, 4=piątek
+MARKET_DAYS     = {0, 1, 2, 3, 4}
+
+
+def is_market_open() -> bool:
+    """Zwraca True jeśli trwa sesja NYSE (pon–pt, 9:25–16:05 ET)."""
+    now_ny  = datetime.now(TIMEZONE_NYSE)
+    weekday = now_ny.weekday()
+    current = now_ny.time()
+    return weekday in MARKET_DAYS and MARKET_OPEN <= current <= MARKET_CLOSE
+
+
+def seconds_until_market_open() -> int:
+    """Zwraca ile sekund do otwarcia następnej sesji."""
+    now_ny  = datetime.now(TIMEZONE_NYSE)
+    weekday = now_ny.weekday()
+
+    # Jeśli dziś dzień roboczy i przed otwarciem
+    if weekday in MARKET_DAYS and now_ny.time() < MARKET_OPEN:
+        target = now_ny.replace(
+            hour=MARKET_OPEN.hour, minute=MARKET_OPEN.minute,
+            second=0, microsecond=0
+        )
+        return int((target - now_ny).total_seconds())
+
+    # Znajdź następny poniedziałek–piątek
+    days_ahead = 1
+    while True:
+        next_day = (weekday + days_ahead) % 7
+        if next_day in MARKET_DAYS:
+            break
+        days_ahead += 1
+
+    from datetime import timedelta
+    target = (now_ny + timedelta(days=days_ahead)).replace(
+        hour=MARKET_OPEN.hour, minute=MARKET_OPEN.minute,
+        second=0, microsecond=0
+    )
+    return int((target - now_ny).total_seconds())
+
+
+def wait_for_market():
+    """Usypia skrypt do otwarcia sesji i wysyła info na Telegram."""
+    secs  = seconds_until_market_open()
+    hours = secs // 3600
+    mins  = (secs % 3600) // 60
+
+    now_pl = datetime.now(TIMEZONE_PL).strftime("%H:%M")
+    print(f"[{now_pl}] Sesja zamknięta — czekam {hours}h {mins}min do otwarcia NYSE.")
+
+    send_telegram(
+        f"😴 <b>Sesja zamknięta</b>\n"
+        f"Monitor uśpiony na {hours}h {mins}min.\n"
+        f"Wznowię o otwarciu NYSE (ok. 15:30 PL)."
+    )
+    time.sleep(secs)
 
 
 # ============================================================
@@ -255,24 +328,36 @@ def main():
     print("="*40)
     print("  Market Monitor — Railway Cloud")
     print("="*40)
-    print(f"TOKEN: {'OK' if TELEGRAM_TOKEN else 'BRAK!'}")
+    print(f"TOKEN:   {'OK' if TELEGRAM_TOKEN else 'BRAK!'}")
     print(f"CHAT_ID: {'OK' if TELEGRAM_CHAT_ID else 'BRAK!'}")
-    print(f"Interwał: co {CHECK_INTERVAL_MINUTES} min\n")
+    print(f"Interwał: co {CHECK_INTERVAL_MINUTES} min")
+    print(f"Tryb: tylko w godzinach sesji NYSE\n")
 
     send_telegram(
         "🚀 <b>Market Monitor uruchomiony w chmurze!</b>\n"
         f"Monitoruję: wolumen, surowce, opcje, instytucje\n"
-        f"Interwał: co {CHECK_INTERVAL_MINUTES} min"
+        f"Interwał: co {CHECK_INTERVAL_MINUTES} min\n"
+        f"Aktywny tylko podczas sesji NYSE (ok. 15:30–22:00 PL)"
     )
 
-    run_all_checks()
-
-    schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(run_all_checks)
-    schedule.every().day.at("18:00").do(daily_summary)
-
     while True:
-        schedule.run_pending()
-        time.sleep(30)
+        if is_market_open():
+            # Sesja otwarta — sprawdzaj normalnie
+            now_pl = datetime.now(TIMEZONE_PL).strftime("%H:%M")
+            print(f"[{now_pl}] Sesja otwarta — monitoruję...")
+            run_all_checks()
+            # Czekaj interwał, ale budź się co minutę żeby sprawdzić
+            # czy sesja nadal trwa
+            for _ in range(CHECK_INTERVAL_MINUTES * 2):
+                time.sleep(30)
+                if not is_market_open():
+                    break
+        else:
+            # Sesja zamknięta — uśpij do otwarcia
+            wait_for_market()
+            # Małe opóźnienie po przebudzeniu
+            time.sleep(10)
+            send_telegram("🔔 <b>Sesja NYSE otwarta!</b> Wznawiam monitorowanie.")
 
 
 if __name__ == "__main__":

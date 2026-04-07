@@ -2,3 +2,4 @@ yfinance==0.2.55
 requests==2.32.3
 pandas==2.2.3
 schedule==1.2.2
+pytz==2024.1

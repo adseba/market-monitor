@@ -314,14 +314,20 @@ def daily_summary():
 #  GŁÓWNA PĘTLA
 # ============================================================
 
-def run_all_checks():
+def run_market_checks():
+    """Sprawdzenia tylko podczas sesji giełdowej (akcje, ETF, opcje, instytucje)."""
     print(f"\n{'='*40}")
-    print(f"Sprawdzanie: {datetime.now():%d.%m.%Y %H:%M:%S}")
+    print(f"Sprawdzanie sesji: {datetime.now():%d.%m.%Y %H:%M:%S}")
     print('='*40)
     check_volume_anomalies()
-    check_commodities()
     check_options_activity()
     check_institutional()
+
+
+def run_commodity_checks():
+    """Surowce — działa 24h na dobę, pon–pt."""
+    print(f"\n[{datetime.now():%H:%M:%S}] Sprawdzanie surowców (24h)...")
+    check_commodities()
 
 
 def main():
@@ -330,34 +336,54 @@ def main():
     print("="*40)
     print(f"TOKEN:   {'OK' if TELEGRAM_TOKEN else 'BRAK!'}")
     print(f"CHAT_ID: {'OK' if TELEGRAM_CHAT_ID else 'BRAK!'}")
-    print(f"Interwał: co {CHECK_INTERVAL_MINUTES} min")
-    print(f"Tryb: tylko w godzinach sesji NYSE\n")
+    print(f"Interwał sesja: co {CHECK_INTERVAL_MINUTES} min")
+    print(f"Interwał surowce: co 15 min (24h)\n")
 
     send_telegram(
         "🚀 <b>Market Monitor uruchomiony w chmurze!</b>\n"
-        f"Monitoruję: wolumen, surowce, opcje, instytucje\n"
-        f"Interwał: co {CHECK_INTERVAL_MINUTES} min\n"
-        f"Aktywny tylko podczas sesji NYSE (ok. 15:30–22:00 PL)"
+        f"Surowce (złoto, srebro, ropa): monitoruję <b>24h</b>\n"
+        f"Akcje/ETF/opcje: tylko podczas sesji NYSE\n"
+        f"Interwał: co {CHECK_INTERVAL_MINUTES} min"
     )
 
+    # Pierwsze sprawdzenie surowców od razu
+    run_commodity_checks()
+
+    last_commodity_check = time.time()
+    COMMODITY_INTERVAL = 15 * 60  # co 15 minut
+
     while True:
+        now = time.time()
+
+        # Surowce — zawsze co 15 minut (pon–pt)
+        now_ny = datetime.now(TIMEZONE_NYSE)
+        is_weekday = now_ny.weekday() in MARKET_DAYS
+        if is_weekday and (now - last_commodity_check) >= COMMODITY_INTERVAL:
+            run_commodity_checks()
+            last_commodity_check = time.time()
+
+        # Akcje/ETF — tylko podczas sesji NYSE
         if is_market_open():
-            # Sesja otwarta — sprawdzaj normalnie
             now_pl = datetime.now(TIMEZONE_PL).strftime("%H:%M")
-            print(f"[{now_pl}] Sesja otwarta — monitoruję...")
-            run_all_checks()
-            # Czekaj interwał, ale budź się co minutę żeby sprawdzić
-            # czy sesja nadal trwa
+            print(f"[{now_pl}] Sesja otwarta — sprawdzam akcje/ETF...")
+            run_market_checks()
+            # Czekaj interwał sprawdzając surowce po drodze
             for _ in range(CHECK_INTERVAL_MINUTES * 2):
                 time.sleep(30)
+                now = time.time()
+                if is_weekday and (now - last_commodity_check) >= COMMODITY_INTERVAL:
+                    run_commodity_checks()
+                    last_commodity_check = time.time()
                 if not is_market_open():
                     break
         else:
-            # Sesja zamknięta — uśpij do otwarcia
-            wait_for_market()
-            # Małe opóźnienie po przebudzeniu
-            time.sleep(10)
-            send_telegram("🔔 <b>Sesja NYSE otwarta!</b> Wznawiam monitorowanie.")
+            # Sesja zamknięta — czekaj ale monitoruj surowce
+            now_pl = datetime.now(TIMEZONE_PL).strftime("%H:%M")
+            secs = seconds_until_market_open()
+            hours = secs // 3600
+            mins  = (secs % 3600) // 60
+            print(f"[{now_pl}] Sesja zamknięta. Do otwarcia: {hours}h {mins}min")
+            time.sleep(60)  # sprawdzaj co minutę czy nie czas na surowce
 
 
 if __name__ == "__main__":

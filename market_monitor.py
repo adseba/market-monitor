@@ -377,13 +377,17 @@ def main():
                 if not is_market_open():
                     break
         else:
-            # Sesja zamknięta — czekaj ale monitoruj surowce
+            # Sesja zamknięta — czekaj ale monitoruj surowce co 15 minut
             now_pl = datetime.now(TIMEZONE_PL).strftime("%H:%M")
             secs = seconds_until_market_open()
             hours = secs // 3600
             mins  = (secs % 3600) // 60
             print(f"[{now_pl}] Sesja zamknięta. Do otwarcia: {hours}h {mins}min")
-            time.sleep(60)  # sprawdzaj co minutę czy nie czas na surowce
+            now = time.time()
+            if (now - last_commodity_check) >= COMMODITY_INTERVAL:
+                run_commodity_checks()
+                last_commodity_check = time.time()
+            time.sleep(60)
 
 
 if __name__ == "__main__":

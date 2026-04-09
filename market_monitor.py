@@ -201,37 +201,30 @@ def check_commodities():
     alerts = []
     for symbol, name in COMMODITIES.items():
         try:
-            # Dane godzinowe z ostatnich 2 dni — wykrywa ruchy śróddzienne
-            hist_1h = yf.Ticker(symbol).history(period="2d", interval="1h")
-            # Dane dzienne z ostatnich 5 dni — do obliczenia zmiany tygodniowej
-            hist_1d = yf.Ticker(symbol).history(period="5d", interval="1d")
+            # Dane 5-minutowe z ostatnich 2 dni — najdokładniejsze do ruchów śróddziennych
+            hist = yf.Ticker(symbol).history(period="2d", interval="5m")
 
-            if hist_1h.empty or len(hist_1h) < 4:
+            if hist.empty or len(hist) < 12:
                 continue
 
-            current_px  = hist_1h["Close"].iloc[-1]
-            # Porównaj z ceną sprzed 1h
-            hour_ago_px = hist_1h["Close"].iloc[-2]
-            # Porównaj z ceną na otwarciu dzisiejszej sesji (pierwsza godzina dnia)
-            now_ny      = datetime.now(TIMEZONE_NYSE)
-            today_open  = hist_1h[hist_1h.index.date == now_ny.date()]
-            open_px     = today_open["Close"].iloc[0] if not today_open.empty else hour_ago_px
+            current_px  = hist["Close"].iloc[-1]
 
-            chg_1h      = ((current_px - hour_ago_px) / hour_ago_px) * 100
-            chg_today   = ((current_px - open_px) / open_px) * 100
+            # Cena sprzed ~1 godziny (12 świeczek po 5 minut)
+            hour_ago_px = hist["Close"].iloc[-12]
 
-            week_chg = 0
-            if not hist_1d.empty and len(hist_1d) >= 2:
-                week_chg = ((current_px - hist_1d["Close"].iloc[0])
-                            / hist_1d["Close"].iloc[0]) * 100
+            # Cena sprzed ~4 godzin (48 świeczek) jako proxy "otwarcia dnia"
+            open_px     = hist["Close"].iloc[-48] if len(hist) >= 48 else hist["Close"].iloc[0]
 
-            # Alert jeśli ruch w ciągu godziny > 0.8% LUB ruch dzienny > PRICE_MOVE_THRESHOLD
-            if abs(chg_1h) >= 0.8 or abs(chg_today) >= PRICE_MOVE_THRESHOLD:
-                icon = "📈" if chg_today > 0 else "📉"
+            chg_1h    = ((current_px - hour_ago_px) / hour_ago_px) * 100
+            chg_today = ((current_px - open_px) / open_px) * 100
+
+            # Alert jeśli ruch w ciągu godziny > 0.8% LUB ruch 4h > 1.5%
+            if abs(chg_1h) >= 0.8 or abs(chg_today) >= 1.5:
+                icon = "📈" if chg_1h > 0 else "📉"
                 alerts.append(
                     f"{icon} <b>{name}</b>\n"
                     f"   Ostatnia godzina: {chg_1h:+.2f}%\n"
-                    f"   Dziś: {chg_today:+.2f}% | Tydz.: {week_chg:+.2f}%\n"
+                    f"   Ostatnie 4h: {chg_today:+.2f}%\n"
                     f"   Cena: ${current_px:.2f}"
                 )
         except Exception as e:
@@ -240,6 +233,8 @@ def check_commodities():
     if alerts:
         send_telegram(format_alert("🏅", "RUCH NA SUROWCACH",
             ["Znaczący ruch cen:"] + alerts))
+    else:
+        print(f"[{datetime.now():%H:%M:%S}] Surowce: brak alertów (złoto: sprawdzono OK)")
     print(f"[{datetime.now():%H:%M:%S}] Surowce: {len(alerts)} alertów")
 
 

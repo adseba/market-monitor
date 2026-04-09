@@ -248,6 +248,44 @@ def check_fear():
 #  GŁÓWNA PĘTLA
 # ============================================================
 
+# ============================================================
+#  MODUŁ 5: PODSUMOWANIE DZIENNE (17:00 PL)
+# ============================================================
+
+_open_prices = {}  # ceny z początku dnia do obliczenia zmiany 24h
+
+def daily_commodity_summary():
+    """Wysyła podsumowanie zmian surowców za ostatnie 24h o 17:00."""
+    global _open_prices
+    lines = []
+
+    for symbol, name in COMMODITIES_AV.items():
+        data = fetch_av_commodity(symbol)
+        time.sleep(12)
+
+        if data is None:
+            continue
+
+        current  = data["price"]
+        open_px  = _open_prices.get(symbol)
+
+        if open_px and open_px > 0:
+            chg_24h = ((current - open_px) / open_px) * 100
+            icon = "🟢" if chg_24h > 0 else "🔴"
+            lines.append(
+                f"{icon} <b>{name}</b>: ${current:.2f} ({chg_24h:+.2f}% / 24h)"
+            )
+        else:
+            lines.append(f"⚪ <b>{name}</b>: ${current:.2f}")
+
+        # Resetuj cenę otwarcia na kolejny dzień
+        _open_prices[symbol] = current
+
+    if lines:
+        send_telegram(fmt("📊", "PODSUMOWANIE DNIA (24h)", lines))
+        print(f"[{datetime.now():%H:%M:%S}] Wysłano podsumowanie dzienne")
+
+
 def main():
     print("="*40)
     print("  Market Monitor v2 — Railway Cloud")
@@ -262,20 +300,36 @@ def main():
         "Alerty: przy ruchu > 0.8%/1h lub > 2%/4h"
     )
 
-    # Pierwsze podsumowanie od razu
+    # Pierwsze podsumowanie od razu + zapisz ceny otwarcia
     hourly_commodity_summary()
+    for symbol in COMMODITIES_AV:
+        data = fetch_av_commodity(symbol)
+        time.sleep(12)
+        if data:
+            _open_prices[symbol] = data["price"]
 
-    last_commodity  = time.time()
-    last_hourly     = time.time()
-    last_session    = time.time()
+    last_commodity   = time.time()
+    last_hourly      = time.time()
+    last_session     = time.time()
+    daily_sent_today = False  # czy dzisiejsze podsumowanie już wysłane
 
     COMMODITY_SECS  = 15 * 60
     HOURLY_SECS     = 60 * 60
     SESSION_SECS    = CHECK_INTERVAL_MINUTES * 60
 
     while True:
-        now = time.time()
-        now_pl = datetime.now(TIMEZONE_PL).strftime("%H:%M")
+        now    = time.time()
+        now_pl = datetime.now(TIMEZONE_PL)
+        now_pl_str = now_pl.strftime("%H:%M")
+
+        # Reset flagi o północy
+        if now_pl.hour == 0 and now_pl.minute == 0:
+            daily_sent_today = False
+
+        # Podsumowanie dzienne o 17:00 PL
+        if now_pl.hour == 17 and now_pl.minute < 2 and not daily_sent_today:
+            daily_commodity_summary()
+            daily_sent_today = True
 
         # Podsumowanie godzinne — zawsze
         if (now - last_hourly) >= HOURLY_SECS:
@@ -289,12 +343,12 @@ def main():
 
         # Sesja giełdowa — wolumen i VIX
         if is_market_open() and (now - last_session) >= SESSION_SECS:
-            print(f"[{now_pl}] Sesja otwarta...")
+            print(f"[{now_pl_str}] Sesja otwarta...")
             check_volume_anomalies()
             check_fear()
             last_session = time.time()
 
-        time.sleep(60)  # sprawdzaj co minutę
+        time.sleep(60)
 
 
 if __name__ == "__main__":

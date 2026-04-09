@@ -116,9 +116,6 @@ COMMODITIES = {
     "GC=F": "Złoto",
     "SI=F": "Srebro",
     "CL=F": "Ropa WTI",
-    "NG=F": "Gaz ziemny",
-    "HG=F": "Miedź",
-    "PL=F": "Platyna",
 }
 
 OPTIONS_PROXY = ["UVXY", "SQQQ", "SPXU", "TQQQ", "NUGT"]
@@ -229,6 +226,7 @@ def check_commodities():
                 )
         except Exception as e:
             print(f"Błąd {symbol}: {e}")
+        time.sleep(3)  # pauza między zapytaniami — unika rate limit
 
     if alerts:
         send_telegram(format_alert("🏅", "RUCH NA SUROWCACH",

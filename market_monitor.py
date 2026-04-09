@@ -21,28 +21,29 @@ import pytz
 #  KONFIGURACJA
 # ============================================================
 
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_TOKEN        = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID      = os.environ.get("TELEGRAM_CHAT_ID", "")
+ALPHA_VANTAGE_KEY     = os.environ.get("ALPHA_VANTAGE_KEY", "")
 
 PRICE_MOVE_THRESHOLD   = float(os.environ.get("PRICE_MOVE_THRESHOLD", "2.0"))
 CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "15"))
 
-TIMEZONE_PL  = pytz.timezone("Europe/Warsaw")
+TIMEZONE_PL   = pytz.timezone("Europe/Warsaw")
 TIMEZONE_NYSE = pytz.timezone("America/New_York")
-MARKET_OPEN  = dtime(9, 25)
-MARKET_CLOSE = dtime(16, 5)
-MARKET_DAYS  = {0, 1, 2, 3, 4}
+MARKET_OPEN   = dtime(9, 25)
+MARKET_CLOSE  = dtime(16, 5)
+MARKET_DAYS   = {0, 1, 2, 3, 4}
 
-# Tylko 3 surowce — minimum zapytań
-COMMODITIES = {
-    "GC=F": "Złoto",
-    "SI=F": "Srebro",
-    "CL=F": "Ropa WTI",
+# Symbole Alpha Vantage dla surowców
+COMMODITIES_AV = {
+    "GOLD":        "Złoto",
+    "SILVER":      "Srebro",
+    "WTI":         "Ropa WTI",
 }
 
-# Minimum instrumentów giełdowych
-STOCKS_TO_WATCH  = ["SPY", "GLD", "SLV"]
-OPTIONS_PROXY    = ["UVXY"]
+# Minimum instrumentów giełdowych (yfinance — tylko sesja)
+STOCKS_TO_WATCH = ["SPY", "GLD", "SLV"]
+OPTIONS_PROXY   = ["UVXY"]
 
 
 # ============================================================
@@ -58,14 +59,37 @@ def is_weekday() -> bool:
     return datetime.now(TIMEZONE_NYSE).weekday() in MARKET_DAYS
 
 
-def fetch(symbol: str, period: str, interval: str):
-    """Pobiera dane z yfinance z obsługą błędów i pauzą."""
-    time.sleep(4)  # pauza przed każdym zapytaniem
+def fetch_av_commodity(symbol: str) -> dict | None:
+    """Pobiera dane surowca z Alpha Vantage (dzienny interwał)."""
+    url = (
+        f"https://www.alphavantage.co/query"
+        f"?function=COMMODITY_EXCHANGE_RATE"
+        f"&from_currency={symbol}"
+        f"&to_currency=USD"
+        f"&apikey={ALPHA_VANTAGE_KEY}"
+    )
+    try:
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        if "Realtime Commodity Exchange Rate" in data:
+            rate = data["Realtime Commodity Exchange Rate"]
+            return {
+                "price": float(rate["5. Exchange Rate"]),
+                "time":  rate["6. Last Refreshed"],
+            }
+    except Exception as e:
+        print(f"Błąd AV {symbol}: {e}")
+    return None
+
+
+def fetch_yf(symbol: str, period: str, interval: str):
+    """Pobiera dane z yfinance z pauzą (tylko dla ETF podczas sesji)."""
+    time.sleep(3)
     try:
         hist = yf.Ticker(symbol).history(period=period, interval=interval)
         return hist if not hist.empty else None
     except Exception as e:
-        print(f"Błąd {symbol}: {e}")
+        print(f"Błąd yf {symbol}: {e}")
         return None
 
 
@@ -99,55 +123,73 @@ def fmt(emoji: str, title: str, lines: list) -> str:
 
 
 # ============================================================
-#  MODUŁ 1: PODSUMOWANIE GODZINNE SUROWCÓW (24h)
+#  MODUŁ 1: PODSUMOWANIE GODZINNE SUROWCÓW (Alpha Vantage)
 # ============================================================
 
+# Przechowuje ostatnie ceny do obliczania zmian
+_last_prices = {}
+
 def hourly_commodity_summary():
+    global _last_prices
     lines = []
-    for symbol, name in COMMODITIES.items():
-        hist = fetch(symbol, "2d", "5m")
-        if hist is None or len(hist) < 12:
+
+    for symbol, name in COMMODITIES_AV.items():
+        data = fetch_av_commodity(symbol)
+        time.sleep(12)  # Alpha Vantage limit: 5 req/min na darmowym planie
+
+        if data is None:
             continue
-        current   = hist["Close"].iloc[-1]
-        hour_ago  = hist["Close"].iloc[-12]
-        chg_1h    = ((current - hour_ago) / hour_ago) * 100
-        icon = "🟢" if chg_1h > 0 else "🔴"
-        lines.append(f"{icon} <b>{name}</b>: ${current:.2f} ({chg_1h:+.2f}% / 1h)")
+
+        current = data["price"]
+        prev    = _last_prices.get(symbol)
+        _last_prices[symbol] = current
+
+        if prev:
+            chg = ((current - prev) / prev) * 100
+            icon = "🟢" if chg > 0 else "🔴"
+            lines.append(f"{icon} <b>{name}</b>: ${current:.2f} ({chg:+.2f}% / 1h)")
+        else:
+            lines.append(f"⚪ <b>{name}</b>: ${current:.2f}")
 
     if lines:
         send_telegram(fmt("⏰", "PODSUMOWANIE GODZINNE", lines))
         print(f"[{datetime.now():%H:%M:%S}] Wysłano podsumowanie godzinne")
     else:
-        print(f"[{datetime.now():%H:%M:%S}] Podsumowanie — brak danych")
+        print(f"[{datetime.now():%H:%M:%S}] Podsumowanie — brak danych AV")
 
 
 # ============================================================
-#  MODUŁ 2: ALERTY SUROWCÓW (ruch > próg)
+#  MODUŁ 2: ALERTY SUROWCÓW (Alpha Vantage)
 # ============================================================
 
 def check_commodities():
     alerts = []
-    for symbol, name in COMMODITIES.items():
-        hist = fetch(symbol, "2d", "5m")
-        if hist is None or len(hist) < 12:
-            continue
-        current  = hist["Close"].iloc[-1]
-        hour_ago = hist["Close"].iloc[-12]
-        day_ago  = hist["Close"].iloc[-48] if len(hist) >= 48 else hist["Close"].iloc[0]
-        chg_1h   = ((current - hour_ago) / hour_ago) * 100
-        chg_4h   = ((current - day_ago) / day_ago) * 100
 
-        if abs(chg_1h) >= 0.8 or abs(chg_4h) >= PRICE_MOVE_THRESHOLD:
-            icon = "📈" if chg_1h > 0 else "📉"
-            alerts.append(
-                f"{icon} <b>{name}</b>\n"
-                f"   1h: {chg_1h:+.2f}% | 4h: {chg_4h:+.2f}%\n"
-                f"   Cena: ${current:.2f}"
-            )
+    for symbol, name in COMMODITIES_AV.items():
+        data = fetch_av_commodity(symbol)
+        time.sleep(12)
+
+        if data is None:
+            continue
+
+        current = data["price"]
+        prev    = _last_prices.get(symbol)
+
+        if prev and prev > 0:
+            chg = ((current - prev) / prev) * 100
+            if abs(chg) >= 0.8:
+                icon = "📈" if chg > 0 else "📉"
+                alerts.append(
+                    f"{icon} <b>{name}</b>\n"
+                    f"   Zmiana: {chg:+.2f}%\n"
+                    f"   Cena: ${current:.2f}"
+                )
+
+        _last_prices[symbol] = current
 
     if alerts:
         send_telegram(fmt("🏅", "RUCH NA SUROWCACH", ["Znaczący ruch:"] + alerts))
-    print(f"[{datetime.now():%H:%M:%S}] Surowce: {len(alerts)} alertów")
+    print(f"[{datetime.now():%H:%M:%S}] Surowce AV: {len(alerts)} alertów")
 
 
 # ============================================================

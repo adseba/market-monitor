@@ -326,7 +326,24 @@ def daily_summary():
 #  GŁÓWNA PĘTLA
 # ============================================================
 
-def run_market_checks():
+def hourly_commodity_summary():
+    """Wysyła godzinne podsumowanie cen złota, srebra i ropy."""
+    lines = []
+    for symbol, name in COMMODITIES.items():
+        try:
+            hist = yf.Ticker(symbol).history(period="2d", interval="5m")
+            if hist.empty or len(hist) < 12:
+                continue
+            current_px  = hist["Close"].iloc[-1]
+            hour_ago_px = hist["Close"].iloc[-12]
+            chg_1h      = ((current_px - hour_ago_px) / hour_ago_px) * 100
+            icon = "🟢" if chg_1h > 0 else "🔴"
+            lines.append(f"{icon} <b>{name}</b>: ${current_px:.2f} ({chg_1h:+.2f}% / 1h)")
+            time.sleep(2)
+        except Exception as e:
+            print(f"Błąd {symbol}: {e}")
+    if lines:
+        send_telegram(format_alert("⏰", "PODSUMOWANIE GODZINNE", lines))
     """Sprawdzenia tylko podczas sesji giełdowej (akcje, ETF, opcje, instytucje)."""
     print(f"\n{'='*40}")
     print(f"Sprawdzanie sesji: {datetime.now():%d.%m.%Y %H:%M:%S}")
@@ -362,12 +379,22 @@ def main():
     run_commodity_checks()
 
     last_commodity_check = time.time()
-    COMMODITY_INTERVAL = 15 * 60  # co 15 minut
+    last_hourly_summary  = time.time()
+    COMMODITY_INTERVAL   = 15 * 60   # co 15 minut
+    HOURLY_INTERVAL      = 60 * 60   # co godzinę
+
+    # Pierwsze podsumowanie od razu
+    hourly_commodity_summary()
 
     while True:
         now = time.time()
 
-        # Surowce — zawsze co 15 minut (pon–pt)
+        # Podsumowanie godzinne — zawsze co godzinę
+        if (now - last_hourly_summary) >= HOURLY_INTERVAL:
+            hourly_commodity_summary()
+            last_hourly_summary = time.time()
+
+        # Surowce — alerty co 15 minut
         now_ny = datetime.now(TIMEZONE_NYSE)
         is_weekday = now_ny.weekday() in MARKET_DAYS
         if is_weekday and (now - last_commodity_check) >= COMMODITY_INTERVAL:

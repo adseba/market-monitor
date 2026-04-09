@@ -42,7 +42,7 @@ COMMODITIES_AV = {
 }
 
 # Minimum instrumentów giełdowych (yfinance — tylko sesja)
-STOCKS_TO_WATCH = ["SPY", "GLD", "SLV"]
+STOCKS_TO_WATCH = ["SPY"]
 OPTIONS_PROXY   = ["UVXY"]
 
 

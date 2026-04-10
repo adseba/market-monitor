@@ -63,54 +63,39 @@ def fetch_yf(symbol: str, period: str, interval: str):
 
 def fetch_all_commodities() -> dict:
     """
-    Pobiera ceny złota, srebra i ropy z Alpha Vantage.
-    Używa 2 zapytań: GOLD_SILVER_SPOT (złoto + srebro naraz) + WTI (ropa).
-    Pauza 13s między zapytaniami (limit: 5 req/min na darmowym planie).
-    Zwraca: {"Złoto": 4812.0, "Srebro": 31.2, "Ropa WTI": 89.4}
+    Pobiera ceny złota, srebra i ropy z Alpha Vantage przez GLOBAL_QUOTE.
+    Używa ETF-ów: GLD (złoto), SLV (srebro), USO (ropa WTI).
+    3 zapytania z pauzą 13s — bezpieczny limit darmowego planu.
+    Zwraca: {"Złoto": 185.2, "Srebro": 28.4, "Ropa WTI": 73.1}
     """
     if not ALPHA_VANTAGE_KEY:
         print("BRAK ALPHA_VANTAGE_KEY!")
         return {}
 
+    symbols = {
+        "GLD": "Złoto",
+        "SLV": "Srebro",
+        "USO": "Ropa WTI",
+    }
+
     prices = {}
     base = "https://www.alphavantage.co/query"
 
-    # Zapytanie 1: złoto i srebro naraz
-    try:
-        r = requests.get(
-            f"{base}?function=GOLD_SILVER_SPOT&apikey={ALPHA_VANTAGE_KEY}",
-            timeout=10
-        )
-        data = r.json()
-        print(f"AV GOLD_SILVER_SPOT odpowiedź: {list(data.keys())}")  # loguj klucze
-        if "Realtime Gold and Silver" in data:
-            metals = data["Realtime Gold and Silver"]
-            if "Gold" in metals:
-                prices["Złoto"] = float(metals["Gold"]["price"])
-            if "Silver" in metals:
-                prices["Srebro"] = float(metals["Silver"]["price"])
-        else:
-            print(f"AV GOLD_SILVER_SPOT nieoczekiwana odpowiedź: {data}")
-    except Exception as e:
-        print(f"Błąd AV GOLD_SILVER_SPOT: {e}")
-
-    time.sleep(13)
-
-    # Zapytanie 2: ropa WTI (zwraca serię dzienną — bierzemy ostatni punkt)
-    try:
-        r = requests.get(
-            f"{base}?function=WTI&interval=daily&apikey={ALPHA_VANTAGE_KEY}",
-            timeout=10
-        )
-        data = r.json()
-        if "data" in data and len(data["data"]) > 0:
-            prices["Ropa WTI"] = float(data["data"][0]["value"])
-        else:
-            print(f"AV WTI nieoczekiwana odpowiedź: {data}")
-    except Exception as e:
-        print(f"Błąd AV WTI: {e}")
-
-    time.sleep(13)
+    for symbol, name in symbols.items():
+        try:
+            r = requests.get(
+                f"{base}?function=GLOBAL_QUOTE&symbol={symbol}&apikey={ALPHA_VANTAGE_KEY}",
+                timeout=10
+            )
+            data = r.json()
+            if "Global Quote" in data and "05. price" in data["Global Quote"]:
+                prices[name] = float(data["Global Quote"]["05. price"])
+                print(f"AV {symbol} ({name}): ${prices[name]:.2f}")
+            else:
+                print(f"AV {symbol} nieoczekiwana odpowiedź: {data}")
+        except Exception as e:
+            print(f"Błąd AV {symbol}: {e}")
+        time.sleep(13)
 
     return prices
 
@@ -272,7 +257,8 @@ def main():
         "🌅 Podsumowanie poranne: 9:00 PL\n"
         "📊 Podsumowanie dzienne: 17:00 PL\n"
         "🚨 Sesja NYSE: wolumen SPY + VIX co 15 min\n"
-        "Łącznie: ~6 zapytań AV dziennie"
+        "Łącznie: ~9 zapytań AV dziennie (start + 9:00 + 17:00)\n"
+        "Surowce: GLD (złoto), SLV (srebro), USO (ropa)"
     )
 
     # Pobierz ceny otwarcia dnia — 2 zapytania AV

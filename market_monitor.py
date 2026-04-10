@@ -50,10 +50,6 @@ def is_market_open() -> bool:
             and MARKET_OPEN <= now_ny.time() <= MARKET_CLOSE)
 
 
-def is_weekday() -> bool:
-    return datetime.now(TIMEZONE_NYSE).weekday() in MARKET_DAYS
-
-
 def fetch_yf(symbol: str, period: str, interval: str):
     """Pobiera dane z yfinance z pauzą. Zwraca DataFrame lub None."""
     time.sleep(3)
@@ -86,6 +82,7 @@ def fetch_all_commodities() -> dict:
             timeout=10
         )
         data = r.json()
+        print(f"AV GOLD_SILVER_SPOT odpowiedź: {list(data.keys())}")  # loguj klucze
         if "Realtime Gold and Silver" in data:
             metals = data["Realtime Gold and Silver"]
             if "Gold" in metals:
@@ -152,7 +149,6 @@ def fmt(emoji: str, title: str, lines: list) -> str:
 # ============================================================
 
 _prices_open  = {}   # ceny z początku dnia (do obliczenia zmiany 24h)
-_prices_prev  = {}   # ceny z poprzedniego podsumowania (do zmiany 1h)
 
 
 # ============================================================
@@ -160,7 +156,6 @@ _prices_prev  = {}   # ceny z poprzedniego podsumowania (do zmiany 1h)
 # ============================================================
 
 def morning_summary():
-    global _prices_prev
     print(f"[{datetime.now():%H:%M:%S}] Podsumowanie poranne — pobieram ceny...")
     prices = fetch_all_commodities()
 
@@ -172,7 +167,6 @@ def morning_summary():
     for name, current in prices.items():
         lines.append(f"⚪ <b>{name}</b>: ${current:.2f}")
 
-    _prices_prev.update(prices)
     send_telegram(fmt("🌅", "PODSUMOWANIE PORANNE", lines))
     print(f"[{datetime.now():%H:%M:%S}] Wysłano podsumowanie poranne")
 
@@ -278,14 +272,13 @@ def main():
         "🌅 Podsumowanie poranne: 9:00 PL\n"
         "📊 Podsumowanie dzienne: 17:00 PL\n"
         "🚨 Sesja NYSE: wolumen SPY + VIX co 15 min\n"
-        "Łącznie: ~4 zapytania AV dziennie"
+        "Łącznie: ~6 zapytań AV dziennie"
     )
 
     # Pobierz ceny otwarcia dnia — 2 zapytania AV
     print("Pobieranie cen otwarcia dnia...")
     opening = fetch_all_commodities()
     _prices_open.update(opening)
-    _prices_prev.update(opening)
     print(f"Ceny otwarcia: {opening}")
 
     last_session       = time.time()

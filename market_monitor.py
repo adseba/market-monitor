@@ -5,10 +5,10 @@
   Wersja: Railway Cloud v3
 ========================================
 Zmienne środowiskowe Railway:
-  TELEGRAM_TOKEN     — token bota Telegram
-  TELEGRAM_CHAT_ID   — twoje chat ID
-  ALPHA_VANTAGE_KEY  — klucz API Alpha Vantage
-  PRICE_MOVE_THRESHOLD — próg alertu % (domyślnie 2.0)
+  TELEGRAM_TOKEN        — token bota Telegram
+  TELEGRAM_CHAT_ID      — twoje chat ID
+  ALPHA_VANTAGE_KEY     — klucz API Alpha Vantage
+  PRICE_MOVE_THRESHOLD  — próg alertu % (domyślnie 2.0)
   CHECK_INTERVAL_MINUTES — interwał sesji (domyślnie 15)
 """
 
@@ -24,10 +24,9 @@ import pytz
 #  KONFIGURACJA
 # ============================================================
 
-TELEGRAM_TOKEN        = os.environ.get("TELEGRAM_TOKEN", "")
-TELEGRAM_CHAT_ID      = os.environ.get("TELEGRAM_CHAT_ID", "")
-ALPHA_VANTAGE_KEY     = os.environ.get("ALPHA_VANTAGE_KEY", "")
-
+TELEGRAM_TOKEN         = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID       = os.environ.get("TELEGRAM_CHAT_ID", "")
+ALPHA_VANTAGE_KEY      = os.environ.get("ALPHA_VANTAGE_KEY", "")
 PRICE_MOVE_THRESHOLD   = float(os.environ.get("PRICE_MOVE_THRESHOLD", "2.0"))
 CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "15"))
 
@@ -37,18 +36,8 @@ MARKET_OPEN   = dtime(9, 25)
 MARKET_CLOSE  = dtime(16, 5)
 MARKET_DAYS   = {0, 1, 2, 3, 4}
 
-# Surowce przez Alpha Vantage (3 zapytania/h = 72/dobę)
-# Darmowy plan AV: 25 req/dzień — używamy tylko podsumowania godzinnego
-# i dziennego, NIE alertów co 15 minut
-COMMODITIES_AV = {
-    "GOLD":   "Złoto",
-    "SILVER": "Srebro",
-    "WTI":    "Ropa WTI",
-}
-
 # ETF sesyjne przez yfinance (tylko podczas sesji NYSE)
 STOCKS_TO_WATCH = ["SPY"]
-OPTIONS_PROXY   = ["UVXY"]
 
 
 # ============================================================
@@ -65,29 +54,6 @@ def is_weekday() -> bool:
     return datetime.now(TIMEZONE_NYSE).weekday() in MARKET_DAYS
 
 
-def fetch_av(symbol: str) -> float | None:
-    """Pobiera aktualną cenę surowca z Alpha Vantage. Zwraca float lub None."""
-    if not ALPHA_VANTAGE_KEY:
-        print("BRAK ALPHA_VANTAGE_KEY!")
-        return None
-    url = (
-        "https://www.alphavantage.co/query"
-        f"?function=COMMODITY_EXCHANGE_RATE"
-        f"&from_currency={symbol}"
-        f"&to_currency=USD"
-        f"&apikey={ALPHA_VANTAGE_KEY}"
-    )
-    try:
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        if "Realtime Commodity Exchange Rate" in data:
-            return float(data["Realtime Commodity Exchange Rate"]["5. Exchange Rate"])
-        print(f"AV {symbol} nieoczekiwana odpowiedź: {data}")
-    except Exception as e:
-        print(f"Błąd AV {symbol}: {e}")
-    return None
-
-
 def fetch_yf(symbol: str, period: str, interval: str):
     """Pobiera dane z yfinance z pauzą. Zwraca DataFrame lub None."""
     time.sleep(3)
@@ -97,6 +63,59 @@ def fetch_yf(symbol: str, period: str, interval: str):
     except Exception as e:
         print(f"Błąd yf {symbol}: {e}")
         return None
+
+
+def fetch_all_commodities() -> dict:
+    """
+    Pobiera ceny złota, srebra i ropy z Alpha Vantage.
+    Używa 2 zapytań: GOLD_SILVER_SPOT (złoto + srebro naraz) + WTI (ropa).
+    Pauza 13s między zapytaniami (limit: 5 req/min na darmowym planie).
+    Zwraca: {"Złoto": 4812.0, "Srebro": 31.2, "Ropa WTI": 89.4}
+    """
+    if not ALPHA_VANTAGE_KEY:
+        print("BRAK ALPHA_VANTAGE_KEY!")
+        return {}
+
+    prices = {}
+    base = "https://www.alphavantage.co/query"
+
+    # Zapytanie 1: złoto i srebro naraz
+    try:
+        r = requests.get(
+            f"{base}?function=GOLD_SILVER_SPOT&apikey={ALPHA_VANTAGE_KEY}",
+            timeout=10
+        )
+        data = r.json()
+        if "Realtime Gold and Silver" in data:
+            metals = data["Realtime Gold and Silver"]
+            if "Gold" in metals:
+                prices["Złoto"] = float(metals["Gold"]["price"])
+            if "Silver" in metals:
+                prices["Srebro"] = float(metals["Silver"]["price"])
+        else:
+            print(f"AV GOLD_SILVER_SPOT nieoczekiwana odpowiedź: {data}")
+    except Exception as e:
+        print(f"Błąd AV GOLD_SILVER_SPOT: {e}")
+
+    time.sleep(13)
+
+    # Zapytanie 2: ropa WTI (zwraca serię dzienną — bierzemy ostatni punkt)
+    try:
+        r = requests.get(
+            f"{base}?function=WTI&interval=daily&apikey={ALPHA_VANTAGE_KEY}",
+            timeout=10
+        )
+        data = r.json()
+        if "data" in data and len(data["data"]) > 0:
+            prices["Ropa WTI"] = float(data["data"][0]["value"])
+        else:
+            print(f"AV WTI nieoczekiwana odpowiedź: {data}")
+    except Exception as e:
+        print(f"Błąd AV WTI: {e}")
+
+    time.sleep(13)
+
+    return prices
 
 
 # ============================================================
@@ -129,77 +148,51 @@ def fmt(emoji: str, title: str, lines: list) -> str:
 
 
 # ============================================================
-#  STAN GLOBALNY — ceny do obliczania zmian
+#  STAN GLOBALNY
 # ============================================================
 
-_prices_hourly = {}   # ceny z ostatniego podsumowania godzinnego
-_prices_daily  = {}   # ceny z początku dnia (reset o północy)
-
-
-def _fetch_all_commodities() -> dict:
-    """Pobiera ceny wszystkich surowców z AV. Pauza 13s między zapytaniami
-    (limit darmowego planu: 5 req/min). Zwraca {symbol: cena}."""
-    prices = {}
-    for symbol in COMMODITIES_AV:
-        price = fetch_av(symbol)
-        if price is not None:
-            prices[symbol] = price
-        time.sleep(13)
-    return prices
+_prices_open  = {}   # ceny z początku dnia (do obliczenia zmiany 24h)
+_prices_prev  = {}   # ceny z poprzedniego podsumowania (do zmiany 1h)
 
 
 # ============================================================
-#  MODUŁ 1: PODSUMOWANIE GODZINNE SUROWCÓW
+#  MODUŁ 1: PODSUMOWANIE PORANNE (9:00 PL)
 # ============================================================
 
-def hourly_commodity_summary():
-    global _prices_hourly
-    print(f"[{datetime.now():%H:%M:%S}] Pobieranie cen surowców (AV)...")
-    prices = _fetch_all_commodities()
+def morning_summary():
+    global _prices_prev
+    print(f"[{datetime.now():%H:%M:%S}] Podsumowanie poranne — pobieram ceny...")
+    prices = fetch_all_commodities()
 
     if not prices:
-        print(f"[{datetime.now():%H:%M:%S}] Podsumowanie godzinne — brak danych AV")
+        print(f"[{datetime.now():%H:%M:%S}] Brak danych AV")
         return
 
     lines = []
-    for symbol, name in COMMODITIES_AV.items():
-        current = prices.get(symbol)
-        if current is None:
-            continue
-        prev = _prices_hourly.get(symbol)
-        if prev and prev > 0:
-            chg = ((current - prev) / prev) * 100
-            icon = "🟢" if chg > 0 else "🔴"
-            lines.append(f"{icon} <b>{name}</b>: ${current:.2f} ({chg:+.2f}% / 1h)")
-        else:
-            lines.append(f"⚪ <b>{name}</b>: ${current:.2f} (pierwsza cena)")
+    for name, current in prices.items():
+        lines.append(f"⚪ <b>{name}</b>: ${current:.2f}")
 
-    _prices_hourly.update(prices)
-
-    if lines:
-        send_telegram(fmt("⏰", "PODSUMOWANIE GODZINNE", lines))
-        print(f"[{datetime.now():%H:%M:%S}] Wysłano podsumowanie godzinne")
+    _prices_prev.update(prices)
+    send_telegram(fmt("🌅", "PODSUMOWANIE PORANNE", lines))
+    print(f"[{datetime.now():%H:%M:%S}] Wysłano podsumowanie poranne")
 
 
 # ============================================================
 #  MODUŁ 2: PODSUMOWANIE DZIENNE (17:00 PL)
 # ============================================================
 
-def daily_commodity_summary():
-    global _prices_daily
-    print(f"[{datetime.now():%H:%M:%S}] Pobieranie cen na podsumowanie dzienne...")
-    prices = _fetch_all_commodities()
+def daily_summary():
+    global _prices_open
+    print(f"[{datetime.now():%H:%M:%S}] Podsumowanie dzienne — pobieram ceny...")
+    prices = fetch_all_commodities()
 
     if not prices:
-        print(f"[{datetime.now():%H:%M:%S}] Podsumowanie dzienne — brak danych AV")
+        print(f"[{datetime.now():%H:%M:%S}] Brak danych AV")
         return
 
     lines = []
-    for symbol, name in COMMODITIES_AV.items():
-        current  = prices.get(symbol)
-        open_px  = _prices_daily.get(symbol)
-        if current is None:
-            continue
+    for name, current in prices.items():
+        open_px = _prices_open.get(name)
         if open_px and open_px > 0:
             chg = ((current - open_px) / open_px) * 100
             icon = "🟢" if chg > 0 else "🔴"
@@ -207,12 +200,11 @@ def daily_commodity_summary():
         else:
             lines.append(f"⚪ <b>{name}</b>: ${current:.2f}")
 
-    if lines:
-        send_telegram(fmt("📊", "PODSUMOWANIE DNIA (24h)", lines))
-        print(f"[{datetime.now():%H:%M:%S}] Wysłano podsumowanie dzienne")
+    send_telegram(fmt("📊", "PODSUMOWANIE DNIA (24h)", lines))
+    print(f"[{datetime.now():%H:%M:%S}] Wysłano podsumowanie dzienne")
 
     # Resetuj ceny otwarcia na następny dzień
-    _prices_daily.update(prices)
+    _prices_open.update(prices)
 
 
 # ============================================================
@@ -283,23 +275,23 @@ def main():
 
     send_telegram(
         "🚀 <b>Market Monitor v3 uruchomiony!</b>\n"
-        "Surowce (AV): złoto, srebro, ropa\n"
-        "Podsumowanie poranne: 9:00 PL\n"
-        "Podsumowanie dzienne: 17:00 PL\n"
-        "Sesja NYSE: wolumen SPY + VIX co 15 min"
+        "🌅 Podsumowanie poranne: 9:00 PL\n"
+        "📊 Podsumowanie dzienne: 17:00 PL\n"
+        "🚨 Sesja NYSE: wolumen SPY + VIX co 15 min\n"
+        "Łącznie: ~4 zapytania AV dziennie"
     )
 
-    # Pobierz ceny otwarcia dnia — tylko raz przy starcie
-    print("Pobieranie cen otwarcia...")
-    opening_prices = _fetch_all_commodities()
-    _prices_daily.update(opening_prices)
-    _prices_hourly.update(opening_prices)
-    print(f"Ceny otwarcia: {opening_prices}")
+    # Pobierz ceny otwarcia dnia — 2 zapytania AV
+    print("Pobieranie cen otwarcia dnia...")
+    opening = fetch_all_commodities()
+    _prices_open.update(opening)
+    _prices_prev.update(opening)
+    print(f"Ceny otwarcia: {opening}")
 
-    last_session      = time.time()
-    daily_sent_today  = False
+    last_session       = time.time()
     morning_sent_today = False
-    last_day          = datetime.now(TIMEZONE_PL).day
+    daily_sent_today   = False
+    last_day           = datetime.now(TIMEZONE_PL).day
 
     SESSION_SECS = CHECK_INTERVAL_MINUTES * 60
 
@@ -307,21 +299,21 @@ def main():
         now    = time.time()
         now_pl = datetime.now(TIMEZONE_PL)
 
-        # Reset flag o północy (nowy dzień)
+        # Reset flag o północy
         if now_pl.day != last_day:
-            daily_sent_today   = False
             morning_sent_today = False
+            daily_sent_today   = False
             last_day = now_pl.day
             print(f"[{now_pl:%H:%M:%S}] Nowy dzień — reset flag")
 
         # Podsumowanie poranne o 9:00 PL
         if now_pl.hour == 9 and now_pl.minute < 2 and not morning_sent_today:
-            hourly_commodity_summary()
+            morning_summary()
             morning_sent_today = True
 
         # Podsumowanie dzienne o 17:00 PL
         if now_pl.hour == 17 and now_pl.minute < 2 and not daily_sent_today:
-            daily_commodity_summary()
+            daily_summary()
             daily_sent_today = True
 
         # Sesja NYSE — wolumen i VIX co CHECK_INTERVAL_MINUTES

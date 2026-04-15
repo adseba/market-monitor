@@ -141,6 +141,7 @@ _prices_open  = {}   # ceny z początku dnia (do obliczenia zmiany 24h)
 # ============================================================
 
 def morning_summary():
+    global _prices_open
     print(f"[{datetime.now():%H:%M:%S}] Podsumowanie poranne — pobieram ceny...")
     prices = fetch_all_commodities()
 
@@ -151,6 +152,9 @@ def morning_summary():
     lines = []
     for name, current in prices.items():
         lines.append(f"⚪ <b>{name}</b>: ${current:.2f}")
+
+    # Zapisz ceny poranne jako punkt odniesienia dla zmiany 24h
+    _prices_open.update(prices)
 
     send_telegram(fmt("🌅", "PODSUMOWANIE PORANNE", lines))
     print(f"[{datetime.now():%H:%M:%S}] Wysłano podsumowanie poranne")
@@ -261,7 +265,7 @@ def main():
         "Surowce: GLD (złoto), SLV (srebro), USO (ropa)"
     )
 
-    # Pobierz ceny otwarcia dnia — 2 zapytania AV
+    # Pobierz ceny otwarcia dnia — 3 zapytania AV (GLD, SLV, USO)
     print("Pobieranie cen otwarcia dnia...")
     opening = fetch_all_commodities()
     _prices_open.update(opening)
